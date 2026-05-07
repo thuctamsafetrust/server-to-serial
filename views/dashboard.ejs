@@ -52,43 +52,22 @@
         let reader;
         let keepReading = false;
 
-        // --- HARDWARE DISCONNECT LISTENER ---
-        navigator.serial.addEventListener("disconnect", async (event) => {
-            // Check if the device that was unplugged is our active card reader
-            if (port && event.target === port) {
-                console.log("Hardware physically unplugged!");
-                
-                // 1. Clean up the zombie memory
-                await disconnectSerial(); 
-                
-                // 2. Reset the UI immediately
-                document.getElementById('tempBadgeNum').value = "⚠️ Hardware Unplugged";
-                
-                const btn = document.querySelector('button[onclick="readSerialOutput()"]');
-                if (btn) {
-                    btn.disabled = false;
-                    btn.innerText = "Read Serial Output";
-                }
-            }
-        });
-
         function openModal(id) { 
             document.getElementById(id).style.display = 'flex'; 
         }
 
         async function closeModal(id) { 
             document.getElementById(id).style.display = 'none'; 
-            // If the user cancels or closes the reader, gracefully shut down the USB port
             await disconnectSerial();
         }
 
         async function disconnectSerial() {
+            keepReading = false; // This tells the loop to stop
             if (reader) {
                 try {
-                    keepReading = false;
-                    await reader.cancel(); // Forces the read loop to stop
+                    await reader.cancel(); 
                     reader.releaseLock();
-                } catch (e) {}
+                } catch (e) { /* Ignore errors if device is already gone */ }
                 reader = null;
             }
             if (port) {
@@ -99,6 +78,15 @@
             }
         }
 
+        // --- HARDWARE DISCONNECT LISTENER ---
+        navigator.serial.addEventListener("disconnect", async (event) => {
+            if (port && event.target === port) {
+                console.log("Hardware physically unplugged!");
+                document.getElementById('tempBadgeNum').value = "⚠️ Hardware Unplugged";
+                await disconnectSerial(); // Instantly sever the ghost connection
+            }
+        });
+
         // --- WEB SERIAL LOGIC ---
         async function readSerialOutput() {
             const btn = document.querySelector('button[onclick="readSerialOutput()"]');
@@ -106,18 +94,14 @@
             btn.innerText = "Connecting...";
 
             try {
-                // 1. Connect to the port (Silently if already authorized)
+                // 1. Connect silently if authorized, else prompt
                 const authorizedPorts = await navigator.serial.getPorts();
-                
                 if (authorizedPorts.length > 0) {
-                    // We already have permission from a previous tap! Grab the known port.
                     port = authorizedPorts[0];
                 } else {
-                    // First time clicking this session? Show the browser popup.
                     port = await navigator.serial.requestPort();
                 }
 
-                // Open the port (it was gracefully closed last time we shut the modal)
                 await port.open({ baudRate: 115200 });
                 
                 document.getElementById('tempBadgeNum').value = "Listening... Please tap card.";
@@ -137,56 +121,58 @@
                     if (done) break; 
                     
                     if (value) {
-                        buffer += value; // Keep adding incoming data to our buffer
+                        buffer += value; 
                         
-                        // Process data ONLY when we see the complete $input: delimiter
                         while (buffer.includes('$input:')) {
-                            // Find exactly where the delimiter is
                             let delimiterIndex = buffer.indexOf('$input:');
-                            
-                            // Extract the complete chunk of data BEFORE the delimiter
                             let chunk = buffer.slice(0, delimiterIndex).trim();
-                            
-                            // Remove that processed chunk AND the delimiter from the buffer memory
                             buffer = buffer.slice(delimiterIndex + '$input:'.length);
                             
-                            // Check if the chunk is our Base64 JSON payload
                             if (chunk.startsWith('eyJ')) {
                                 try {
-                                    // Decode Base64 and parse JSON
                                     const decodedString = atob(chunk);
                                     const jsonData = JSON.parse(decodedString);
                                     
-                                    // Extract the Badge Number dynamically
                                     let badgeId = null;
                                     if (jsonData.card && jsonData.card.apps && jsonData.card.apps.length > 0) {
                                         const appObject = jsonData.card.apps[0];
                                         badgeId = Object.values(appObject)[0];
                                     }
 
-                                    // If we successfully extracted an ID, update the UI instantly
                                     if (badgeId) {
                                         document.getElementById('tempBadgeNum').value = badgeId;
                                     }
                                 } catch (parseError) {
-                                    console.error("Failed to parse payload. Chunk might be corrupted.", parseError);
+                                    console.error("Failed to parse payload.", parseError);
                                 }
                             }
                         }
                     }
                 }
             } catch (err) {
-                alert("Port Locked!\n1. Physically UNPLUG the USB reader.\n2. Plug it back in.\n3. Refresh this page.");
-                console.error(err);
+                // Only show alert if it was a weird crash, NOT a physical unplug
+                if (keepReading) {
+                    console.error(err);
+                    alert("Connection Error.\n\nIf the reader locked up, unplug it and plug it back in.");
+                }
+            } finally {
+                // 3. THE BULLETPROOF UI RESET
+                // This runs no matter what causes the loop to stop!
                 btn.disabled = false;
                 btn.innerText = "Read Serial Output";
+                
+                // If it wasn't a badge tap or a physical unplug, clear the input
+                const currentText = document.getElementById('tempBadgeNum').value;
+                if (currentText === "Listening... Please tap card.") {
+                    document.getElementById('tempBadgeNum').value = "";
+                }
             }
         }
 
         // Move the scanned number to the main form and close the USB port
         async function applyToForm() {
             document.getElementById('finalBadgeNum').value = document.getElementById('tempBadgeNum').value;
-            await disconnectSerial(); // Free up the USB port so it doesn't get stuck
+            await disconnectSerial(); 
             document.getElementById('readerModal').style.display = 'none';
         }
 
@@ -200,23 +186,19 @@
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({ badgeNumber: num })
             });
-            window.location.reload(); // Refresh the page to show the new badge list
+            window.location.reload(); 
         }
-        
+
         // Tell the Render Cloud Server to delete a badge
         async function deleteBadge(num) {
-            // Add a safety confirmation popup
             const isConfirmed = confirm(`Are you sure you want to delete badge: ${num}?`);
             if (!isConfirmed) return;
 
-            // Send the delete request to our new API endpoint
             await fetch('/api/delete-badge', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({ badgeNumber: num })
             });
-            
-            // Refresh the page so the deleted badge disappears from the UI
             window.location.reload(); 
         }
     </script>
