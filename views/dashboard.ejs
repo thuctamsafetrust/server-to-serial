@@ -52,6 +52,26 @@
         let reader;
         let keepReading = false;
 
+        // --- HARDWARE DISCONNECT LISTENER ---
+        navigator.serial.addEventListener("disconnect", async (event) => {
+            // Check if the device that was unplugged is our active card reader
+            if (port && event.target === port) {
+                console.log("Hardware physically unplugged!");
+                
+                // 1. Clean up the zombie memory
+                await disconnectSerial(); 
+                
+                // 2. Reset the UI immediately
+                document.getElementById('tempBadgeNum').value = "⚠️ Hardware Unplugged";
+                
+                const btn = document.querySelector('button[onclick="readSerialOutput()"]');
+                if (btn) {
+                    btn.disabled = false;
+                    btn.innerText = "Read Serial Output";
+                }
+            }
+        });
+
         function openModal(id) { 
             document.getElementById(id).style.display = 'flex'; 
         }
