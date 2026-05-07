@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Dashboard</title>
+    <style>
+        body { font-family: sans-serif; padding: 20px; background: #f0f2f5; }
+        .card { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); max-width: 400px; }
+        .modal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); justify-content: center; align-items: center; }
+        .modal-content { background: white; padding: 30px; border-radius: 8px; width: 300px; }
+        button { cursor: pointer; padding: 8px 12px; margin-top: 10px; }
+        input { width: 100%; padding: 8px; margin-top: 5px; box-sizing: border-box; }
+    </style>
+</head>
+<body>
+
+    <div class="card">
+        <h2>Welcome, <%= username %></h2>
+        <h3>Existing Badges:</h3>
+        <ul>
+            <% badges.forEach(b => { %> 
+                <li style="margin-bottom: 8px;">
+                    <strong><%= b %></strong> 
+                    <button onclick="deleteBadge('<%= b %>')" style="background: #dc3545; color: white; border: none; border-radius: 4px; padding: 4px 8px; margin-left: 10px; font-size: 12px;">Delete</button>
+                </li> 
+            <% }) %>
+        </ul>
+        <button onclick="openModal('newBadgeModal')">Add New Badge</button>
+    </div>
+
+    <div id="newBadgeModal" class="modal">
+        <div class="modal-content">
+            <h3>New Badge</h3>
+            <button onclick="openModal('readerModal')" style="background: #007bff; color: white; border: none; width: 100%;">Open Card Reader</button>
+            <p>New Badge Number: <input type="text" id="finalBadgeNum"></p>
+            <button onclick="saveBadgeToCloud()">Save</button>
+            <button onclick="closeModal('newBadgeModal')">Cancel</button>
+        </div>
+    </div>
+
+    <div id="readerModal" class="modal">
+        <div class="modal-content" style="border: 2px solid #007bff;">
+            <h3>Card Reader</h3>
+            <p>Scanned: <input type="text" id="tempBadgeNum" readonly placeholder="Waiting for scan..."></p>
+            <button onclick="readSerialOutput()" style="background: #28a745; color: white; border: none; width: 100%;">Read Serial Output</button>
+            <button onclick="applyToForm()">Save (Apply)</button>
+            <button onclick="closeModal('readerModal')">Cancel</button>
+        </div>
+    </div>
+
+    <script>
+        let port;
+        let reader;
+        let keepReading = false;
+
+        function openModal(id) { 
+            document.getElementById(id).style.display = 'flex'; 
+        }
+
+        async function closeModal(id) { 
+            document.getElementById(id).style.display = 'none'; 
+            // If the user cancels or closes the reader, gracefully shut down the USB port
+            await disconnectSerial();
+        }
+
+        async function disconnectSerial() {
+            if (reader) {
+                try {
+                    keepReading = false;
+                    await reader.cancel(); // Forces the read loop to stop
+                    reader.releaseLock();
+                } catch (e) {}
+                reader = null;
+            }
+            if (port) {
+                try {
+                    await port.close();
+                } catch (e) {}
+                port = null;
+            }
+        }
+
+        // --- WEB SERIAL LOGIC ---
+        async function readSerialOutput() {
+            const btn = document.querySelector('button[onclick="readSerialOutput()"]');
+            btn.disabled = true;
+            btn.innerText = "Connecting...";
+
+            try {
+                // 1. Connect to the port
+                port = await navigator.serial.requestPort();
+                await port.open({ baudRate: 115200 });
+                
+                document.getElementById('tempBadgeNum').value = "Listening... Please tap card.";
+                btn.innerText = "✓ Connected (Tap Card)";
+                
+                const textDecoder = new TextDecoderStream();
+                const readableStreamClosed = port.readable.pipeTo(textDecoder.writable);
+                reader = textDecoder.readable.getReader();
+
+                keepReading = true;
+                let buffer = "";
+
+                // 2. The Continuous Read Loop
+                while (keepReading) {
+                    const { value, done } = await reader.read();
+                    
+                    if (done) break; 
+                    
+                    if (value) {
+                        buffer += value; // Keep adding incoming data to our buffer
+                        
+                        // Process data ONLY when we see the complete $input: delimiter
+                        while (buffer.includes('$input:')) {
+                            // Find exactly where the delimiter is
+                            let delimiterIndex = buffer.indexOf('$input:');
+                            
+                            // Extract the complete chunk of data BEFORE the delimiter
+                            let chunk = buffer.slice(0, delimiterIndex).trim();
+                            
+                            // Remove that processed chunk AND the delimiter from the buffer memory
+                            buffer = buffer.slice(delimiterIndex + '$input:'.length);
+                            
+                            // Check if the chunk is our Base64 JSON payload
+                            if (chunk.startsWith('eyJ')) {
+                                try {
+                                    // Decode Base64 and parse JSON
+                                    const decodedString = atob(chunk);
+                                    const jsonData = JSON.parse(decodedString);
+                                    
+                                    // Extract the Badge Number dynamically
+                                    let badgeId = null;
+                                    if (jsonData.card && jsonData.card.apps && jsonData.card.apps.length > 0) {
+                                        const appObject = jsonData.card.apps[0];
+                                        badgeId = Object.values(appObject)[0];
+                                    }
+
+                                    // If we successfully extracted an ID, update the UI instantly
+                                    if (badgeId) {
+                                        document.getElementById('tempBadgeNum').value = badgeId;
+                                    }
+                                } catch (parseError) {
+                                    console.error("Failed to parse payload. Chunk might be corrupted.", parseError);
+                                }
+                            }
+                        }
+                    }
+                }
+            } catch (err) {
+                alert("Port Locked!\n1. Physically UNPLUG the USB reader.\n2. Plug it back in.\n3. Refresh this page.");
+                console.error(err);
+                btn.disabled = false;
+                btn.innerText = "Read Serial Output";
+            }
+        }
+
+        // Move the scanned number to the main form and close the USB port
+        async function applyToForm() {
+            document.getElementById('finalBadgeNum').value = document.getElementById('tempBadgeNum').value;
+            await disconnectSerial(); // Free up the USB port so it doesn't get stuck
+            document.getElementById('readerModal').style.display = 'none';
+        }
+
+        // Send the data back to the Render Cloud Server
+        async function saveBadgeToCloud() {
+            const num = document.getElementById('finalBadgeNum').value;
+            if (!num) return alert("No badge number to save!");
+
+            await fetch('/api/save-badge', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ badgeNumber: num })
+            });
+            window.location.reload(); // Refresh the page to show the new badge list
+        }
+        
+        // Tell the Render Cloud Server to delete a badge
+        async function deleteBadge(num) {
+            // Add a safety confirmation popup
+            const isConfirmed = confirm(`Are you sure you want to delete badge: ${num}?`);
+            if (!isConfirmed) return;
+
+            // Send the delete request to our new API endpoint
+            await fetch('/api/delete-badge', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ badgeNumber: num })
+            });
+            
+            // Refresh the page so the deleted badge disappears from the UI
+            window.location.reload(); 
+        }
+    </script>
+</body>
+</html>
