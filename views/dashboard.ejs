@@ -86,8 +86,18 @@
             btn.innerText = "Connecting...";
 
             try {
-                // 1. Connect to the port
-                port = await navigator.serial.requestPort();
+                // 1. Connect to the port (Silently if already authorized)
+                const authorizedPorts = await navigator.serial.getPorts();
+                
+                if (authorizedPorts.length > 0) {
+                    // We already have permission from a previous tap! Grab the known port.
+                    port = authorizedPorts[0];
+                } else {
+                    // First time clicking this session? Show the browser popup.
+                    port = await navigator.serial.requestPort();
+                }
+
+                // Open the port (it was gracefully closed last time we shut the modal)
                 await port.open({ baudRate: 115200 });
                 
                 document.getElementById('tempBadgeNum').value = "Listening... Please tap card.";
